@@ -1,0 +1,26 @@
+pandas
+numpy
+faiss-cpu
+sentence-transformers
+lightgbm
+langchain
+langchain-groq
+spacy<3.8.0; python_version < "3.13"
+networkx
+redis
+fastapi
+uvicorn[standard]
+pydantic
+torch
+streamlit
+requests
+pyvis
+python-multipart
+python-dotenv
+sqlalchemy
+datasets
+pgvector
+psycopg2-binary
+qdrant-client
+opensearch-py
+pytest

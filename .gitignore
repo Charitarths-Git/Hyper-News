@@ -1,0 +1,78 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Runtime Assets (keep the folders, not the generated files)
+data/**
+!data/
+!data/README.md
+
+models/**
+!models/
+!models/README.md
+
+graph/**
+!graph/
+!graph/README.md
+
+artifacts/**
+!artifacts/
+!artifacts/README.md
+
+logs/**
+!logs/
+!logs/README.md
+!logs/archive/
+logs/archive/**
+!logs/archive/.gitkeep
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+.next/
+out/
+
+# Logs & Process Output
+*.log
+*.stdout.log
+*.stderr.log
+*.pid
+
+# Test & Local Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

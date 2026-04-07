@@ -1,0 +1,10 @@
+numpy
+pandas
+pyarrow
+networkx
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+python-dotenv
+psycopg2-binary
