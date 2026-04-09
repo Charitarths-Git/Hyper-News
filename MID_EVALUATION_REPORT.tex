@@ -1,0 +1,329 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+\title{HyperNews Mid Evaluation Report}
+\author{Workspace Status Review}
+\date{April 18, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Abstract}
+This report summarizes the current state of the HyperNews hyper-personalized news recommendation system in the present workspace. The system already includes a Next.js frontend, a FastAPI backend, durable user-state persistence, a hybrid search path, a structured knowledge graph, a contextual bandit for reinforcement-style feedback adaptation, and an LTR scoring layer with runtime fallback weights. The main current strength is that the end-to-end loop from recommendation to feedback logging is already implemented. The main current weakness is query-time latency in the local fallback RAG path when OpenSearch and Qdrant are unavailable.
+
+\section{Project Snapshot}
+\subsection{Implemented Components}
+\begin{itemize}[leftmargin=1.5em]
+  \item Web UI in \texttt{frontend/app/page.tsx} with feed loading, search, mood selection, exploration control, and feedback buttons.
+  \item Auth.js credential login in \texttt{frontend/auth.ts}.
+  \item Backend APIs in \texttt{backend/app.py} for recommendation, feedback, search suggestion, profile, history, graph, auth, and reset.
+  \item User-state management in \texttt{backend/user_profile.py}.
+  \item Durable storage in \texttt{backend/db.py} using SQLite by default, with PostgreSQL wiring present.
+  \item Hybrid retrieval in \texttt{backend/hybrid_search.py}.
+  \item Query embedding and explanation helpers in \texttt{backend/rag_pipeline.py}.
+  \item Knowledge graph construction and expansion in \texttt{backend/graph.py}.
+  \item Ranking and candidate generation in \texttt{backend/ranker.py}.
+  \item Contextual bandit in \texttt{backend/bandit.py}.
+  \item LTR scoring wrapper in \texttt{backend/ltr.py}.
+  \item Offline MIND evaluation in \texttt{backend/evaluate_mind.py}.
+\end{itemize}
+
+\subsection{Observed Workspace Status}
+The current workspace contains the following relevant artifacts:
+\begin{itemize}[leftmargin=1.5em]
+  \item Prepared article corpus: 51,282 articles.
+  \item Embedding matrix: 51,282 vectors of dimension 384.
+  \item Local profile database: \texttt{data/hypernews.db}.
+  \item Current database counts: 15 users, 7 auth users, 47 stored reading vectors, 30 feedback events, 43 recommendation events, 10 search events, and 324 ranking feature rows.
+  \item Startup log evidence shows a stable 5,000-article capped runtime with a cached knowledge graph of 18,497 nodes.
+\end{itemize}
+
+\section{End-to-End Feed Flow}
+\subsection{1. How the First Request Starts}
+The first interaction begins in the frontend. In \texttt{frontend/app/page.tsx}, the home page either:
+\begin{itemize}[leftmargin=1.5em]
+  \item uses the authenticated Auth.js session user id, or
+  \item creates and stores a guest id in browser local storage under \texttt{hypernews\_guest\_user\_id}.
+\end{itemize}
+
+Once the page has a user id, a \texttt{useEffect} calls the recommendation route immediately. The request goes to:
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{/api/recommend} for authenticated users, or
+  \item \texttt{/api/public/recommend} for guests.
+\end{itemize}
+
+Those Next.js proxy routes inject \texttt{user\_id} and \texttt{session\_id} and forward the payload to the backend \texttt{POST /recommend} endpoint.
+
+\subsection{2. How User Information Is Retrieved}
+Inside \texttt{backend/app.py}, the backend calls \texttt{get\_or\_create\_user(user\_id)}. That function reconstructs the active user profile from three layers:
+\begin{enumerate}[leftmargin=1.5em]
+  \item Long-term durable state from \texttt{users} in SQLite/PostgreSQL:
+  interests, full reading history, average dwell time.
+  \item Short-term session state from Redis or in-memory fallback:
+  recent clicks, recent skips, recent negative actions, session topics, recent queries, recent entities, recent sources, total positive interactions, and the current mood.
+  \item Recent-state snapshot from \texttt{user\_recent\_state}:
+  a persistent copy of the most recent windows so the session can be reconstructed even if the process restarts.
+\end{enumerate}
+
+This means the feed does not depend only on one table. It combines durable behavior, hot session context, and a recent-state recovery layer.
+
+\subsection{3. How Cold Start Works}
+The backend classifies a user as semi-cold-start when:
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{total\_positive\_interactions < 5}, and
+  \item there is no search query.
+\end{itemize}
+
+In that case, \texttt{cold\_start\_recommendations()} in \texttt{backend/ranker.py} builds the first feed using:
+\begin{itemize}[leftmargin=1.5em]
+  \item mood,
+  \item time of day,
+  \item category diversity,
+  \item popularity,
+  \item recent negative categories to avoid.
+\end{itemize}
+
+So the very first feed is not yet driven by dense long-term personalization. It is a context-aware bootstrap feed.
+
+\subsection{4. What Happens When the User Clicks}
+Every card rendered by \texttt{frontend/components/NewsCard.tsx} exposes actions such as:
+\texttt{read\_full}, \texttt{save}, \texttt{more\_like\_this}, \texttt{skip}, \texttt{not\_interested}, and optionally \texttt{less\_from\_source}.
+
+When the user clicks one of these, the frontend sends a \texttt{POST /feedback} request containing:
+\begin{itemize}[leftmargin=1.5em]
+  \item user id,
+  \item article id,
+  \item request id,
+  \item impression id,
+  \item position,
+  \item action type,
+  \item active query text,
+  \item source metadata.
+\end{itemize}
+
+The backend then performs all of the following in one flow:
+\begin{itemize}[leftmargin=1.5em]
+  \item computes a reward from action type and dwell time,
+  \item updates the contextual bandit,
+  \item optionally propagates positive reward to sibling articles and KG-linked neighbors,
+  \item updates recent clicks or recent negative actions,
+  \item updates category interest weights,
+  \item appends to full reading history,
+  \item stores the article embedding in long-term reading memory,
+  \item writes feedback and ranking labels into the database,
+  \item persists short-term session state and recent-state snapshots.
+\end{itemize}
+
+This is the main learning loop of the system.
+
+\section{Recent vs Past User Behavior}
+\subsection{Recent Behavior}
+Recent behavior is maintained in \texttt{backend/user\_profile.py}. The important windows are:
+\begin{itemize}[leftmargin=1.5em]
+  \item recent clicks: last 25,
+  \item recent negative actions: last 25,
+  \item recent queries: last 10,
+  \item recent entities: last 25,
+  \item recent sources: last 25.
+\end{itemize}
+
+There is also a separate recent-history store keyed by timestamp with a 1-hour TTL. That hot layer is intended to support very recent interaction awareness.
+
+\subsection{Past Behavior}
+Older behavior is stored in two long-term places:
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{users.reading\_history}: the article ids the user has positively engaged with,
+  \item \texttt{reading\_history\_vectors}: article embeddings plus a feedback weight for semantic recall of past interests.
+\end{itemize}
+
+This separation is important. Recent behavior drives short-term intent, while past behavior drives long-term memory and semantic profile construction.
+
+\section{How RAG, RL, Knowledge Graph, and LTR Work Together}
+\subsection{RAG Search Path}
+When the request contains a query, \texttt{backend/app.py} switches to the query path and calls \texttt{build\_hybrid\_candidates()} in \texttt{backend/hybrid\_search.py}. That function builds candidates from four sources:
+\begin{enumerate}[leftmargin=1.5em]
+  \item lexical search over title, abstract, category, subcategory, source, and entity labels,
+  \item dense retrieval when a sentence-transformer query encoder is available,
+  \item memory search using recent clicks, recent entities, recent sources, and optional Qdrant user memory,
+  \item knowledge-graph expansion from the strongest seed articles, categories, and entities.
+\end{enumerate}
+
+These rankings are fused with reciprocal rank fusion and optionally reranked by a cross-encoder. The result is not yet the final feed order. It is only the candidate set.
+
+\subsection{RL / Bandit Path}
+After candidate generation, \texttt{rank\_articles()} scores each candidate. One feature inside that score is the contextual bandit score from \texttt{backend/bandit.py}. The bandit uses a 391-dimensional context vector:
+\begin{itemize}[leftmargin=1.5em]
+  \item 384 article-embedding dimensions,
+  \item 7 context features: mood, time of day, click count, interest entropy, skip ratio, diversity hunger, and KG affinity.
+\end{itemize}
+
+The bandit therefore learns from both user feedback and article context, not only raw click counts.
+
+\subsection{Knowledge Graph Contribution}
+The knowledge graph in \texttt{backend/graph.py} is built over:
+\begin{itemize}[leftmargin=1.5em]
+  \item article nodes,
+  \item category nodes,
+  \item subcategory nodes,
+  \item entity nodes.
+\end{itemize}
+
+It is used in three places:
+\begin{enumerate}[leftmargin=1.5em]
+  \item candidate expansion during search,
+  \item \texttt{kg\_score} as a ranking feature,
+  \item reward propagation after positive feedback so related articles also receive a smaller reinforcement signal.
+\end{enumerate}
+
+This is where KG and RL become coupled rather than operating as isolated modules.
+
+\subsection{Long-Term Memory Contribution}
+Long-term memory is built in \texttt{build\_long\_term\_memory\_signal()} in \texttt{backend/ranker.py}. The function:
+\begin{itemize}[leftmargin=1.5em]
+  \item queries similar historical reading vectors,
+  \item expands around those historical reads using vector neighbors and KG neighbors,
+  \item returns both additional candidate articles and a \texttt{memory\_bonus\_map}.
+\end{itemize}
+
+That memory bonus is then added in the final ranking stage.
+
+\subsection{LTR Contribution}
+The LTR wrapper in \texttt{backend/ltr.py} acts as the base scorer when a model or fallback weights are available. The final score in \texttt{rank\_articles()} combines:
+\begin{itemize}[leftmargin=1.5em]
+  \item LTR base score,
+  \item context multiplier,
+  \item KG bonus,
+  \item memory bonus,
+  \item penalties for repeats, skipped categories, skipped entities, and skipped articles.
+\end{itemize}
+
+So the complete pipeline is:
+\begin{center}
+Query or feed request $\rightarrow$ candidate generation $\rightarrow$ feature extraction $\rightarrow$ LTR base scoring $\rightarrow$ context/KG/memory adjustment $\rightarrow$ MMR/diversity reordering.
+\end{center}
+
+\section{Current Evaluation Evidence}
+\subsection{Offline Evaluation}
+Running \texttt{backend/evaluate\_mind.py --limit-impressions 100} in this workspace produced the following results:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Model Variant & AUC & MRR & nDCG@5 & nDCG@10 \\
+\midrule
+Baseline naive graph & 0.5691 & 0.3366 & 0.3034 & 0.3627 \\
+Improved structured graph & 0.5739 & 0.3298 & 0.3088 & 0.3728 \\
+Structured graph + neural bandit path & 0.5739 & 0.3298 & 0.3088 & 0.3728 \\
+Structured graph + hybrid memory & 0.5435 & 0.3219 & 0.3009 & 0.3588 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Interpretation:
+\begin{itemize}[leftmargin=1.5em]
+  \item The structured graph improves AUC and nDCG over the naive baseline.
+  \item The current bandit path does not yet improve the offline metric slice.
+  \item The current hybrid-memory formulation underperforms the structured-graph baseline on this sample and therefore still needs tuning.
+\end{itemize}
+
+\subsection{Runtime Status}
+The startup logs in this workspace show:
+\begin{itemize}[leftmargin=1.5em]
+  \item Qdrant unavailable, therefore vector-store fallback is active.
+  \item OpenSearch unavailable, therefore lexical fallback is active.
+  \item LightGBM unavailable at runtime, therefore deterministic LTR fallback is active.
+  \item Transformer history encoder unavailable, therefore weighted-mean profile fallback is active.
+\end{itemize}
+
+This means the current local behavior reflects a correct functional system, but not the full intended production retrieval stack.
+
+\section{Why RAG Search Is Slow Right Now}
+\subsection{Measured Query Latency}
+Direct timing in this workspace produced the following local fallback search measurements:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Dataset Size & Query & Approx. Total Time & Main Hotspots \\
+\midrule
+5,000 articles & \texttt{microsoft ai} & 0.97s & lexical + memory \\
+5,000 articles & \texttt{olympics football} & 0.90s & lexical + memory \\
+51,282 articles & \texttt{microsoft ai} & 20.62s & lexical + memory \\
+51,282 articles & \texttt{olympics football} & 11.23s & lexical + memory \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On the full 51,282-article corpus, the two dominant measured costs were:
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{lexical\_search()}: about 8--14 seconds,
+  \item \texttt{memory\_search()}: about 3--7 seconds.
+\end{itemize}
+
+\subsection{Root Causes in the Current Code}
+The current slowdown comes mainly from implementation structure rather than the KG itself.
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Full-dataframe lexical scans per query.}
+  \texttt{lexical\_search()} rebuilds combined text fields and performs token containment checks across the whole dataframe for each query.
+
+  \item \textbf{Full-dataframe memory scans per query.}
+  \texttt{memory\_search()} iterates through all rows to compare sources and entities even when the relevant set is small.
+
+  \item \textbf{Fallback local stack instead of production indexes.}
+  The logs show OpenSearch and Qdrant are unavailable, so the code cannot offload lexical retrieval or vector similarity to dedicated engines.
+
+  \item \textbf{Dense retrieval is effectively disabled in the measured local path.}
+  When the sentence-transformer query model is not active, the dense branch contributes no ranking, so the system leans more heavily on slow lexical and memory heuristics.
+
+  \item \textbf{The local vector index is a numpy cosine search wrapper.}
+  In \texttt{backend/rag\_pipeline.py}, \texttt{NumpyVectorIndex} performs brute-force matrix scoring rather than using an actual persisted FAISS/HNSW backend.
+\end{enumerate}
+
+\subsection{Most Important Fixes}
+The highest-value next optimizations are:
+\begin{itemize}[leftmargin=1.5em]
+  \item enable OpenSearch and Qdrant so search leaves the Pandas fallback path,
+  \item precompute lexical search fields once at startup instead of per query,
+  \item precompute article source/entity maps so \texttt{memory\_search()} does not loop over raw dataframe rows every time,
+  \item restrict memory scoring to a smaller candidate subset before global scans,
+  \item keep the 5k startup cap for local demos until the retrieval stack is upgraded,
+  \item replace the numpy search wrapper with a true ANN index for large local corpora.
+\end{itemize}
+
+\section{Current Mid-Evaluation Conclusion}
+The project has already crossed the prototype threshold. The recommendation loop is not a mock pipeline: it genuinely connects frontend actions, backend state reconstruction, persistent user modeling, query-time hybrid retrieval, knowledge-graph expansion, bandit updates, and ranking-feature logging. That is strong mid-stage progress.
+
+However, the evaluation evidence also shows that not every advanced component is yet providing consistent measurable gain. The structured KG is helping, but the current bandit path is not yet improving the tested offline slice, and the hybrid-memory setup still needs refinement. The biggest engineering blocker is query latency in the fallback RAG path, which currently scales poorly on the full local corpus.
+
+The clearest next milestone is therefore:
+\begin{quote}
+stabilize retrieval performance first, then retune memory and bandit contributions using the ranking logs already being collected.
+\end{quote}
+
+\section{Suggested Next Phase}
+\begin{enumerate}[leftmargin=1.5em]
+  \item Move search traffic to OpenSearch and Qdrant in the default run path.
+  \item Add timing instrumentation around lexical, memory, KG, rerank, and rank stages inside \texttt{/recommend}.
+  \item Refactor \texttt{memory\_search()} to avoid full corpus iteration.
+  \item Re-evaluate the hybrid-memory feature after the retrieval bottleneck is removed.
+  \item Train and load the LTR model in an environment with LightGBM available at runtime.
+  \item Use accumulated \texttt{ranking\_feature\_events} and feedback labels to retune the scoring weights.
+\end{enumerate}
+
+\end{document}
