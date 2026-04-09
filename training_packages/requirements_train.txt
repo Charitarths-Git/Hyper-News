@@ -1,0 +1,35 @@
+# HyperNews Training Requirements
+# Install: pip install -r requirements_train.txt
+#
+# GPU: torch with CUDA is required for DQN training.
+# CPU-only will work for bio_encoder and kg_gnn on small graphs.
+#
+# Colab: torch + torchvision are pre-installed; just run:
+#   pip install sentence-transformers faiss-cpu lightgbm scikit-learn
+
+# Core ML
+torch>=2.1.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Embeddings
+sentence-transformers>=2.2.0
+
+# Vector search (CPU fallback)
+faiss-cpu>=1.7.4
+
+# LTR baseline
+lightgbm>=4.0.0
+
+# Clustering (bio encoder training)
+scikit-learn>=1.3.0
+
+# Data loading
+pandas>=2.0.0
+datasets>=2.14.0
+
+# KG
+networkx>=3.0
+
+# Progress & logging
+tqdm>=4.65.0
