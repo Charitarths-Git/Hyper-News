@@ -1,0 +1,107 @@
+# Local/full-stack reference only.
+# Free cloud deployment uses the root Dockerfile for the backend plus Vercel/Render/Supabase.
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: hypernews
+      POSTGRES_USER: hypernews
+      POSTGRES_PASSWORD: hypernews
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hypernews -d hypernews"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200 >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  backend:
+    image: python:3.12-slim
+    working_dir: /app
+    command: >
+      bash -lc "pip install --no-cache-dir -r requirements.txt &&
+      uvicorn backend.app:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATABASE_URL: postgresql://hypernews:hypernews@postgres:5432/hypernews
+      REDIS_URL: redis://redis:6379
+      QDRANT_URL: http://qdrant:6333
+      OPENSEARCH_URL: http://opensearch:9200
+      HYPERNEWS_ENABLE_QDRANT: "1"
+      HYPERNEWS_ENABLE_OPENSEARCH: "1"
+      HYPERNEWS_ENABLE_RERANKER: "1"
+      NEXT_PUBLIC_API_URL: http://backend:8000
+      HYPERNEWS_BACKEND_URL: http://backend:8000
+      AUTH_SECRET: change-me-to-a-long-random-string
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    ports:
+      - "8000:8000"
+
+  frontend:
+    image: node:22
+    working_dir: /app/frontend
+    command: >
+      bash -lc "npm install &&
+      npm run dev -- --hostname 0.0.0.0"
+    environment:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      HYPERNEWS_BACKEND_URL: http://backend:8000
+      AUTH_SECRET: change-me-to-a-long-random-string
+    depends_on:
+      - backend
+    volumes:
+      - ./:/app
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  opensearch_data:
